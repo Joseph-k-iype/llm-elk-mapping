@@ -1,18 +1,15 @@
 """
-Authentication helper functions for working with Azure AD tokens and API security.
+Authentication helper functions for working with Azure AD tokens.
+This is a simplified version of auth_helper.py that removes API key verification.
 """
 
-import os
 import logging
 import time
 import threading
 import requests
-import secrets
-import string
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List, Union
-from fastapi import Depends, HTTPException, status, Security
-from fastapi.security import APIKeyHeader, OAuth2PasswordBearer
+from typing import Optional, Dict, Any
+from fastapi import Depends, HTTPException, status
 from jose import JWTError, jwt
 from pydantic import BaseModel
 from app.config.settings import get_settings
@@ -24,11 +21,6 @@ class Token(BaseModel):
     access_token: str
     token_type: str
     expires_at: datetime
-
-
-class TokenData(BaseModel):
-    username: Optional[str] = None
-    scopes: List[str] = []
 
 
 class TokenCache:
@@ -289,73 +281,20 @@ def start_token_refresh_service(refresh_interval: int = 300) -> threading.Thread
     return refresh_thread
 
 
-# API Key security
-settings = get_settings()
-api_key_header = APIKeyHeader(name=settings.security.api_key_header, auto_error=False)
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token", auto_error=False)
-
-# Hard-coded API keys for demo purposes - in production, store in a secure database
-API_KEYS = {
-    "dev": "dev-api-key-123",
-    "test": "test-api-key-456",
-    "admin": "admin-api-key-789"
-}
-
-# Generate a secret key if not provided
-def generate_secret_key(length=32):
-    """Generate a random secret key."""
-    alphabet = string.ascii_letters + string.digits
-    return ''.join(secrets.choice(alphabet) for _ in range(length))
-
-SECRET_KEY = settings.security.secret_key or generate_secret_key()
-ALGORITHM = settings.security.algorithm
-ACCESS_TOKEN_EXPIRE_MINUTES = settings.security.access_token_expire_minutes
-
-
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
-    """Create a JWT access token."""
-    to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
-
-
-async def verify_api_key(api_key: str = Security(api_key_header)):
+# Simplified auth functions - No API key verification
+async def verify_api_key(api_key: str = None):
     """
-    API key verification is disabled.
-    This function always returns True for all API keys.
+    No API key verification required.
+    This function always returns True.
     """
     return True
 
 
-async def get_current_user(token: str = Depends(oauth2_scheme)):
-    """Get the current user from the JWT token."""
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    
-    if token is None:
-        raise credentials_exception
-    
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        if username is None:
-            raise credentials_exception
-        token_data = TokenData(username=username)
-    except JWTError:
-        raise credentials_exception
-    
-    # In a real system, you would look up the user in a database
-    # For this example, we'll just create a simple user object
-    if token_data.username:
-        user = {"username": token_data.username}
-        return user
-        
-    raise credentials_exception
+async def get_current_user(token: str = None):
+    """
+    Simplified user authentication.
+    For direct connection without auth, this just returns a default user.
+    """
+    # Create a simple user object
+    user = {"username": "default_user"}
+    return user

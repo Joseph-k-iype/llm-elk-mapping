@@ -12,7 +12,6 @@ class AzureSettings(BaseModel):
     client_id: str = Field(..., env="AZURE_CLIENT_ID")
     client_secret: str = Field(..., env="AZURE_CLIENT_SECRET")
     openai_endpoint: str = Field(..., env="AZURE_OPENAI_ENDPOINT")
-    openai_api_key: str = Field(..., env="AZURE_OPENAI_API_KEY")
     embedding_model: str = Field("text-embedding-3-large", env="AZURE_EMBEDDING_MODEL")
     deployment_name: str = Field("text-embedding-3-large", env="AZURE_EMBEDDING_DEPLOYMENT") 
     llm_model: str = Field("gpt-4o-mini", env="AZURE_LLM_MODEL")
@@ -25,7 +24,6 @@ class ElasticsearchSettings(BaseModel):
     password: Optional[str] = Field(None, env="ELASTICSEARCH_PASSWORD")
 
 class SecuritySettings(BaseModel):
-    api_key_header: str = Field("X-API-Key", env="API_KEY_HEADER")
     secret_key: str = Field("your-secret-key-here", env="SECRET_KEY")
     algorithm: str = Field("HS256", env="JWT_ALGORITHM")
     access_token_expire_minutes: int = Field(30, env="ACCESS_TOKEN_EXPIRE_MINUTES")
