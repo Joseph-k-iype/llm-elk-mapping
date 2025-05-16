@@ -1,8 +1,6 @@
 """
 Environment Configuration - Utilities for managing environment variables and configuration.
-
-This module provides utilities for loading and managing environment variables,
-handling proxy configuration, and accessing credentials for external services.
+Loads environment variables from both config.env and credentials.env.
 """
 
 import os
@@ -79,8 +77,27 @@ class OSEnv:
             proxy_enabled: Override the PROXY_ENABLED setting
         """
         self.var_list = []
+        
+        # Check if files exist first to provide better error messages
+        config_exists = os.path.isfile(config_file) and os.access(config_file, os.R_OK)
+        creds_exists = os.path.isfile(creds_file) and os.access(creds_file, os.R_OK)
+        
+        if not config_exists:
+            logger.warning(f"Warning: Configuration file '{config_file}' not found or not readable")
+        
+        if not creds_exists:
+            logger.warning(f"Warning: Credentials file '{creds_file}' not found or not readable")
+            
+        # Load configuration (even if files don't exist, we'll just log warnings)
         self.bulk_set(config_file, True)
+        
+        # Explicitly log that we're loading the credentials file
+        logger.info(f"Loading credentials from {creds_file}")
         self.bulk_set(creds_file, False)
+        
+        # Check for Azure credentials after loading both files
+        self._check_azure_credentials()
+        
         self.set_certificate_path(certificate_path)
         
         # Handle proxy_enabled override
@@ -106,6 +123,28 @@ class OSEnv:
         
         # Set PostgreSQL environment variables if not already set
         self._set_postgres_defaults()
+    
+    def _check_azure_credentials(self):
+        """
+        Check if required Azure credentials are set and log warnings if not.
+        """
+        required_vars = [
+            "AZURE_TENANT_ID", 
+            "AZURE_CLIENT_ID", 
+            "AZURE_CLIENT_SECRET",
+            "AZURE_OPENAI_ENDPOINT"
+        ]
+        
+        for var in required_vars:
+            value = self.get(var)
+            if not value:
+                logger.warning(f"Required Azure variable {var} is not set in environment or config files")
+            elif var == "AZURE_TENANT_ID" and value == "default-tenant-id":
+                logger.warning(f"{var} is set to default value. Check if credentials.env was properly loaded.")
+            elif var == "AZURE_CLIENT_ID" and value == "default-client-id":
+                logger.warning(f"{var} is set to default value. Check if credentials.env was properly loaded.")
+            elif var == "AZURE_CLIENT_SECRET" and value == "default-client-secret":
+                logger.warning(f"{var} is set to default value. Check if credentials.env was properly loaded.")
         
     def _set_postgres_defaults(self):
         """Set default PostgreSQL environment variables if not already set."""
@@ -125,24 +164,6 @@ class OSEnv:
                 
         # Log PostgreSQL configuration (without password)
         logger.info(f"PostgreSQL configuration: host={self.get('PG_HOST')}, port={self.get('PG_PORT')}, db={self.get('PG_DB')}, user={self.get('PG_USER')}")
-        
-        # Vector database configuration
-        vector_db_type = self.get("VECTOR_DB_TYPE", "chroma").lower()  # Default to chroma
-        logger.info(f"Vector database type: {vector_db_type}")
-        
-        if vector_db_type == "chroma":
-            # Set defaults for ChromaDB
-            chroma_defaults = {
-                "CHROMA_PERSIST_DIR": self.get("CHROMA_PERSIST_DIR", "./data/chroma_db"),
-                "CHROMA_COLLECTION": self.get("CHROMA_COLLECTION", "business_terms")
-            }
-            
-            # Set defaults if not already set
-            for key, value in chroma_defaults.items():
-                if not self.get(key):
-                    self.set(key, value)
-                    
-            logger.info(f"ChromaDB configuration: persist_dir={self.get('CHROMA_PERSIST_DIR')}, collection={self.get('CHROMA_COLLECTION')}")
     
     def _get_credential(self):
         """
@@ -155,12 +176,26 @@ class OSEnv:
             logger.info("Using DefaultAzureCredential (managed identity)")
             return DefaultAzureCredential()
         else:
-            logger.info("Using ClientSecretCredential")
-            return ClientSecretCredential(
-                tenant_id=self.get("AZURE_TENANT_ID"), 
-                client_id=self.get("AZURE_CLIENT_ID"), 
-                client_secret=self.get("AZURE_CLIENT_SECRET")
-            )
+            # Get Azure credentials from environment
+            tenant_id = self.get("AZURE_TENANT_ID")
+            client_id = self.get("AZURE_CLIENT_ID")
+            client_secret = self.get("AZURE_CLIENT_SECRET")
+            
+            # Log credentials (masking secrets)
+            if tenant_id and client_id and client_secret:
+                masked_tenant = f"{tenant_id[:4]}...{tenant_id[-4:]}" if len(tenant_id) > 8 else "***"
+                masked_client = f"{client_id[:4]}...{client_id[-4:]}" if len(client_id) > 8 else "***"
+                logger.info(f"Using ClientSecretCredential with tenant_id: {masked_tenant}, client_id: {masked_client}")
+                
+                return ClientSecretCredential(
+                    tenant_id=tenant_id, 
+                    client_id=client_id, 
+                    client_secret=client_secret
+                )
+            else:
+                logger.warning("Missing Azure AD credentials, cannot create ClientSecretCredential")
+                logger.warning("Make sure AZURE_TENANT_ID, AZURE_CLIENT_ID, and AZURE_CLIENT_SECRET are set in credentials.env")
+                return None
     
     def set_certificate_path(self, path: str):
         """
@@ -201,6 +236,10 @@ class OSEnv:
             
             if os.path.exists(dotenvfile) and is_file_readable(dotenvfile):
                 temp_dict = dotenv_values(dotenvfile)
+                
+                # Log how many variables were loaded
+                logger.info(f"Loading {len(temp_dict)} environment variables from {dotenvfile}")
+                
                 for key, value in temp_dict.items():
                     self.set(key, value, print_val)
                 del temp_dict
@@ -302,15 +341,43 @@ class OSEnv:
             str: Azure AD token
         """
         try:
-            credential = ClientSecretCredential(
-                tenant_id=self.get("AZURE_TENANT_ID"),
-                client_id=self.get("AZURE_CLIENT_ID"),
-                client_secret=self.get("AZURE_CLIENT_SECRET")
-            )
-            token = credential.get_token("https://cognitiveservices.azure.com/.default")
-            self.set("AZURE_TOKEN", token.token, print_val=False)
-            logger.info("Azure token set successfully")
-            return token.token
+            # Get Azure credentials from environment
+            tenant_id = self.get("AZURE_TENANT_ID")
+            client_id = self.get("AZURE_CLIENT_ID")
+            client_secret = self.get("AZURE_CLIENT_SECRET")
+            
+            # Log which credentials are being used (masked for security)
+            if tenant_id and client_id and client_secret:
+                masked_tenant = f"{tenant_id[:4]}...{tenant_id[-4:]}" if len(tenant_id) > 8 else "***"
+                masked_client = f"{client_id[:4]}...{client_id[-4:]}" if len(client_id) > 8 else "***"
+                logger.info(f"Acquiring Azure token with tenant_id: {masked_tenant}, client_id: {masked_client}")
+            
+                # Create credential
+                credential = ClientSecretCredential(
+                    tenant_id=tenant_id,
+                    client_id=client_id,
+                    client_secret=client_secret
+                )
+                
+                # Get token
+                token = credential.get_token("https://cognitiveservices.azure.com/.default")
+                
+                if token and token.token:
+                    self.set("AZURE_TOKEN", token.token, print_val=False)
+                    logger.info("Azure token acquired successfully")
+                    return token.token
+                else:
+                    logger.error("Failed to get Azure token (token is None)")
+            else:
+                logger.error("Missing Azure credentials, cannot get token")
+                if not tenant_id:
+                    logger.error("AZURE_TENANT_ID is not set")
+                if not client_id:
+                    logger.error("AZURE_CLIENT_ID is not set")
+                if not client_secret:
+                    logger.error("AZURE_CLIENT_SECRET is not set")
+            
+            return None
         except Exception as e:
             logger.error(f"Error retrieving Azure token: {e}")
             return None
@@ -319,11 +386,16 @@ class OSEnv:
         """
         List all environment variables (with sensitive values redacted).
         """
-        for var in self.var_list:
+        logger.info("Environment variables currently set:")
+        for var in sorted(self.var_list):
             if var in {'AZURE_TOKEN', 'AD_USER_PW', 'AZURE_CLIENT_SECRET', 'PG_PASSWORD'}:
                 logger.info(f"{var}: [REDACTED]")
             else:
-                logger.info(f"{var}: {os.getenv(var)}")
+                value = os.getenv(var)
+                # Truncate very long values
+                if value and len(value) > 100:
+                    value = value[:97] + "..."
+                logger.info(f"{var}: {value}")
 
 # Singleton instance for application-wide access
 _os_env_instance = None
@@ -348,6 +420,7 @@ def get_os_env(
     """
     global _os_env_instance
     if _os_env_instance is None:
+        logger.info(f"Initializing environment from {config_file} and {creds_file}")
         _os_env_instance = OSEnv(config_file, creds_file, certificate_path, proxy_enabled)
     elif proxy_enabled is not None and proxy_enabled != str_to_bool(_os_env_instance.get("PROXY_ENABLED", "False")):
         # If proxy_enabled changes, recreate the instance

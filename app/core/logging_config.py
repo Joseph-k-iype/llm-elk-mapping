@@ -104,7 +104,6 @@ def configure_logging(config: Optional[Dict[str, Any]] = None) -> None:
     logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("asyncio").setLevel(logging.WARNING)
-    logging.getLogger("chromadb").setLevel(logging.WARNING)
     
     # Log configuration
     logging.info(f"Logging configured with level={log_level_name}, format={log_format_name}")

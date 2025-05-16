@@ -1,5 +1,5 @@
 """
-Script to initialize Elasticsearch with proper index settings and mappings.
+Enhanced script to initialize Elasticsearch with advanced vector search capabilities.
 """
 
 import os
@@ -8,7 +8,7 @@ import asyncio
 import argparse
 import logging
 from elasticsearch import AsyncElasticsearch
-from elasticsearch.exceptions import NotFoundError
+from elasticsearch.exceptions import NotFoundError, RequestError
 from app.config.settings import get_settings
 from app.core.environment import get_os_env
 
@@ -23,13 +23,24 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-async def init_elasticsearch(force_recreate=False, analyzer_config=None, shards=1, replicas=0):
+async def init_elasticsearch(
+    force_recreate=False, 
+    vector_dims=3072, 
+    vector_similarity="cosine",
+    hnsw_m=16, 
+    hnsw_ef_construction=100, 
+    shards=1, 
+    replicas=0
+):
     """
-    Initialize Elasticsearch with proper index settings and mappings.
+    Initialize Elasticsearch with advanced vector search capabilities.
     
     Args:
         force_recreate: Whether to force recreate the index if it exists
-        analyzer_config: Custom analyzer configuration
+        vector_dims: Dimension of embedding vectors
+        vector_similarity: Similarity function (cosine, dot_product, l2_norm)
+        hnsw_m: Number of bi-directional links in HNSW graph
+        hnsw_ef_construction: Controls quality of the graph during construction
         shards: Number of primary shards
         replicas: Number of replicas
     """
@@ -42,26 +53,52 @@ async def init_elasticsearch(force_recreate=False, analyzer_config=None, shards=
     username = settings.elasticsearch.username
     password = settings.elasticsearch.password
     
-    # Set up authentication
-    auth = None
-    if username and password:
-        auth = (username, password)
+    # Extract host URL from the array (using first one)
+    host_url = hosts[0] if isinstance(hosts, list) else hosts
     
-    # Create Elasticsearch client
+    # Remove quotes if they exist in the URL string
+    if isinstance(host_url, str) and (host_url.startswith('"') or host_url.startswith("'")):
+        host_url = host_url.strip('\'"')
+    
+    # Ensure we're using HTTPS
+    if not host_url.startswith("https://"):
+        # Replace http:// with https:// or add https:// if no protocol is specified
+        if host_url.startswith("http://"):
+            host_url = host_url.replace("http://", "https://")
+        else:
+            host_url = f"https://{host_url}"
+    
+    logger.info(f"Connecting to Elasticsearch at {host_url}")
+    
+    # Setup auth if credentials are provided
+    auth_params = {}
+    if username and password:
+        auth_params["basic_auth"] = (username, password)
+        logger.info(f"Using basic authentication with username: {username}")
+    
+    # Create Elasticsearch client with settings that worked for the user
     client = AsyncElasticsearch(
-        hosts=hosts,
-        basic_auth=auth,
-        verify_certs=False,
-        request_timeout=60
+        host_url,  # Use direct URL string with HTTPS
+        **auth_params,
+        verify_certs=False,  # Disable cert verification for development
+        ssl_show_warn=False  # Suppress SSL warnings
     )
     
     try:
-        logger.info(f"Connecting to Elasticsearch at {', '.join(hosts)}")
-        
         # Check if Elasticsearch is running
         info = await client.info()
         es_version = info["version"]["number"]
-        logger.info(f"Connected to Elasticsearch version {es_version}")
+        cluster_name = info["cluster_name"]
+        logger.info(f"Connected to Elasticsearch version {es_version} on cluster '{cluster_name}'")
+        
+        # Log vector search configuration
+        logger.info(f"Vector search configuration:")
+        logger.info(f"  - Vector dimensions: {vector_dims}")
+        logger.info(f"  - Similarity function: {vector_similarity}")
+        logger.info(f"  - HNSW m parameter: {hnsw_m}")
+        logger.info(f"  - HNSW ef_construction: {hnsw_ef_construction}")
+        logger.info(f"  - Shards: {shards}")
+        logger.info(f"  - Replicas: {replicas}")
         
         # Check if index exists
         index_exists = await client.indices.exists(index=index_name)
@@ -74,10 +111,10 @@ async def init_elasticsearch(force_recreate=False, analyzer_config=None, shards=
         
         # Create index if it doesn't exist
         if not index_exists:
-            logger.info(f"Creating index '{index_name}'")
+            logger.info(f"Creating index '{index_name}' with advanced vector search settings")
             
-            # Default analyzer configuration
-            default_analyzer = {
+            # Define enhanced analyzer configuration
+            analyzer_config = {
                 "analyzer": {
                     "default": {
                         "type": "standard"
@@ -96,17 +133,22 @@ async def init_elasticsearch(force_recreate=False, analyzer_config=None, shards=
                 }
             }
             
-            # Use custom analyzer if provided
-            analyzer = analyzer_config if analyzer_config else default_analyzer
-            
-            # Index settings
-            settings_config = {
+            # Define index settings with KNN capabilities
+            index_settings = {
                 "settings": {
                     "number_of_shards": shards,
                     "number_of_replicas": replicas,
-                    "analysis": analyzer,
+                    "index.knn": True,  # Enable KNN capabilities
+                    "analysis": analyzer_config,
                     "index.mapping.coerce": True,
-                    "index.mapping.ignore_malformed": True
+                    "index.mapping.ignore_malformed": True,
+                    # Add memory circuit breaker settings
+                    "index.knn.memory_circuit_breaker.enabled": True,
+                    "index.knn.memory_circuit_breaker.limit": "70%",
+                    # Cache settings
+                    "index.knn.space_type": vector_similarity,
+                    # Preload caching
+                    "index.store.preload": ["nvd", "dvd"]
                 },
                 "mappings": {
                     "properties": {
@@ -121,7 +163,10 @@ async def init_elasticsearch(force_recreate=False, analyzer_config=None, shards=
                         },
                         "pbt_definition": {
                             "type": "text", 
-                            "analyzer": "standard"
+                            "analyzer": "standard",
+                            "fields": {
+                                "keyword": {"type": "keyword"}
+                            }
                         },
                         "cdm": {
                             "type": "text", 
@@ -132,123 +177,89 @@ async def init_elasticsearch(force_recreate=False, analyzer_config=None, shards=
                         },
                         "embedding": {
                             "type": "dense_vector",
-                            "dims": 3072,  # Dimension size for text-embedding-3-large
+                            "dims": vector_dims,
                             "index": True,
-                            "similarity": "cosine"
+                            "similarity": vector_similarity,
+                            "index_options": {
+                                "type": "hnsw",
+                                "m": hnsw_m,
+                                "ef_construction": hnsw_ef_construction
+                            }
                         }
                     }
                 }
             }
             
-            # Create index with settings
-            await client.indices.create(index=index_name, body=settings_config)
-            logger.info(f"Index '{index_name}' created successfully with {shards} shards and {replicas} replicas")
+            # Create index with enhanced settings
+            try:
+                await client.indices.create(index=index_name, body=index_settings)
+                logger.info(f"Index '{index_name}' created successfully with advanced vector search capabilities")
+            except RequestError as e:
+                if "resource_already_exists_exception" in str(e):
+                    logger.warning(f"Index '{index_name}' already exists, skipping creation")
+                else:
+                    # Check if this is a compatibility error and try with simplified settings
+                    logger.warning(f"Error creating index: {e}")
+                    logger.info("Trying with simplified HNSW settings...")
+                    
+                    # Simplify settings based on Elasticsearch version
+                    try:
+                        # Remove knn-specific settings that might not be supported
+                        if "index.knn" in index_settings["settings"]:
+                            del index_settings["settings"]["index.knn"]
+                        if "index.knn.memory_circuit_breaker.enabled" in index_settings["settings"]:
+                            del index_settings["settings"]["index.knn.memory_circuit_breaker.enabled"]
+                        if "index.knn.memory_circuit_breaker.limit" in index_settings["settings"]:
+                            del index_settings["settings"]["index.knn.memory_circuit_breaker.limit"]
+                        if "index.knn.space_type" in index_settings["settings"]:
+                            del index_settings["settings"]["index.knn.space_type"]
+                        
+                        await client.indices.create(index=index_name, body=index_settings)
+                        logger.info(f"Index '{index_name}' created successfully with simplified settings")
+                    except Exception as e2:
+                        logger.error(f"Failed to create index with simplified settings: {e2}")
+                        raise
             
-            # Check if index was created successfully
-            index_exists = await client.indices.exists(index=index_name)
-            if index_exists:
-                logger.info(f"Verified index '{index_name}' exists")
-                
-                # Get index settings and mappings
-                index_settings = await client.indices.get_settings(index=index_name)
-                logger.info(f"Index settings: {index_settings}")
-                
-                index_mappings = await client.indices.get_mapping(index=index_name)
-                logger.info(f"Index mappings: {index_mappings}")
-            else:
-                logger.error(f"Failed to create index '{index_name}'")
+            # Create index alias
+            alias_name = f"{index_name}_alias"
+            logger.info(f"Creating alias '{alias_name}' for index '{index_name}'")
+            try:
+                await client.indices.put_alias(index=index_name, name=alias_name)
+                logger.info(f"Alias '{alias_name}' created successfully")
+            except Exception as e:
+                logger.warning(f"Error creating alias: {e}")
+            
         else:
             logger.info(f"Index '{index_name}' already exists")
             
-            # Update settings if needed
+            # Update index settings if applicable
             if not force_recreate:
-                logger.info(f"Updating index settings and mappings not implemented. Use --force to recreate the index with new settings.")
-        
-        # Create index aliases if needed
-        alias_name = f"{index_name}_alias"
-        alias_exists = False
-        
-        try:
-            alias_info = await client.indices.get_alias(name=alias_name)
-            alias_exists = True
-        except NotFoundError:
-            alias_exists = False
-        
-        if not alias_exists:
-            await client.indices.put_alias(index=index_name, name=alias_name)
-            logger.info(f"Created alias '{alias_name}' for index '{index_name}'")
-        else:
-            logger.info(f"Alias '{alias_name}' already exists")
-        
-        # Create ILM policy (Index Lifecycle Management)
-        policy_name = f"{index_name}_policy"
-        policy_exists = False
-        
-        try:
-            # Check if ILM policy exists
-            policy_info = await client.ilm.get_lifecycle(name=policy_name)
-            policy_exists = True
-        except NotFoundError:
-            policy_exists = False
-        except Exception as e:
-            # ILM might not be available in all Elasticsearch versions
-            logger.warning(f"ILM might not be available: {e}")
-        
-        if not policy_exists:
-            try:
-                # Create ILM policy
-                ilm_policy = {
-                    "policy": {
-                        "phases": {
-                            "hot": {
-                                "min_age": "0ms",
-                                "actions": {
-                                    "set_priority": {
-                                        "priority": 100
-                                    }
-                                }
-                            },
-                            "warm": {
-                                "min_age": "30d",
-                                "actions": {
-                                    "set_priority": {
-                                        "priority": 50
-                                    },
-                                    "shrink": {
-                                        "number_of_shards": 1
-                                    },
-                                    "forcemerge": {
-                                        "max_num_segments": 1
-                                    }
-                                }
-                            },
-                            "cold": {
-                                "min_age": "60d",
-                                "actions": {
-                                    "set_priority": {
-                                        "priority": 0
-                                    },
-                                    "freeze": {}
-                                }
-                            },
-                            "delete": {
-                                "min_age": "90d",
-                                "actions": {
-                                    "delete": {}
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                await client.ilm.put_lifecycle(name=policy_name, body=ilm_policy)
-                logger.info(f"Created ILM policy '{policy_name}'")
-            except Exception as e:
-                logger.warning(f"Could not create ILM policy: {e}")
-        else:
-            logger.info(f"ILM policy '{policy_name}' already exists")
+                try:
+                    # Get current settings
+                    current_settings = await client.indices.get_settings(index=index_name)
+                    logger.info(f"Current index settings retrieved")
+                    
+                    # Check for vector search capabilities
+                    mapping = await client.indices.get_mapping(index=index_name)
+                    properties = mapping.get(index_name, {}).get("mappings", {}).get("properties", {})
+                    
+                    # Check if embedding field exists and has vector search capabilities
+                    if "embedding" in properties:
+                        embedding_field = properties["embedding"]
+                        if embedding_field.get("type") == "dense_vector" and embedding_field.get("index") is True:
+                            logger.info("Vector search is enabled on the existing index")
+                        else:
+                            logger.warning("The embedding field exists but vector search is not configured correctly")
+                            logger.warning("To enable vector search, recreate the index with the --force option")
+                    else:
+                        logger.warning("The embedding field does not exist in the current mapping")
+                        logger.warning("To add the embedding field, recreate the index with the --force option")
+                        
+                except Exception as e:
+                    logger.error(f"Error checking index configuration: {e}")
         
         logger.info("Elasticsearch initialization completed successfully")
+        
     except Exception as e:
         logger.error(f"Error initializing Elasticsearch: {e}")
         raise
@@ -259,8 +270,13 @@ async def init_elasticsearch(force_recreate=False, analyzer_config=None, shards=
 
 def main():
     """Main function to run the script."""
-    parser = argparse.ArgumentParser(description="Initialize Elasticsearch with proper index settings and mappings")
+    parser = argparse.ArgumentParser(description="Initialize Elasticsearch with advanced vector search capabilities")
     parser.add_argument("--force", action="store_true", help="Force recreate the Elasticsearch index")
+    parser.add_argument("--vector-dims", type=int, default=3072, help="Vector dimensions for embedding field")
+    parser.add_argument("--vector-similarity", choices=["cosine", "dot_product", "l2_norm"], default="cosine", 
+                        help="Similarity function for vector search")
+    parser.add_argument("--hnsw-m", type=int, default=16, help="Number of bi-directional links in HNSW graph")
+    parser.add_argument("--hnsw-ef-construction", type=int, default=100, help="Controls quality of the graph during construction")
     parser.add_argument("--shards", type=int, default=1, help="Number of primary shards")
     parser.add_argument("--replicas", type=int, default=0, help="Number of replicas")
     args = parser.parse_args()
@@ -269,7 +285,15 @@ def main():
     env = get_os_env()
     
     # Run the async function
-    asyncio.run(init_elasticsearch(args.force, None, args.shards, args.replicas))
+    asyncio.run(init_elasticsearch(
+        args.force, 
+        args.vector_dims, 
+        args.vector_similarity,
+        args.hnsw_m, 
+        args.hnsw_ef_construction, 
+        args.shards, 
+        args.replicas
+    ))
 
 if __name__ == "__main__":
     main()
